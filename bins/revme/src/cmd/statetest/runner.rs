@@ -530,7 +530,7 @@ pub fn execute_test_suite(
 
 pub fn run(
     test_files: Vec<PathBuf>,
-    mut single_thread: bool,
+    mut _single_thread: bool,
     trace: bool,
     mut print_outcome: bool,
     keep_going: bool,
@@ -541,7 +541,7 @@ pub fn run(
     }
     // `print_outcome` or trace implies single_thread
     if print_outcome {
-        single_thread = true;
+        _single_thread = true;
     }
     let n_files = test_files.len();
 
@@ -553,10 +553,7 @@ pub fn run(
     let queue = Arc::new(Mutex::new((0usize, test_files)));
     let elapsed = Arc::new(Mutex::new(std::time::Duration::ZERO));
 
-    let num_threads = match (single_thread, std::thread::available_parallelism()) {
-        (true, _) | (false, Err(_)) => 1,
-        (false, Ok(n)) => n.get(),
-    };
+    let num_threads = 1;
     let num_threads = num_threads.min(n_files);
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
