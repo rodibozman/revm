@@ -2,7 +2,15 @@ use super::{
     merkle_trie::{log_rlp_hash, state_merkle_trie_root},
     utils::recover_address,
 };
-use database::State;
+use database::{
+    states::CacheAccount,
+    AccountStatus::{
+        Changed, Destroyed, DestroyedAgain, DestroyedChanged, InMemoryChange, Loaded,
+        LoadedEmptyEIP161, LoadedNotExisting,
+    },
+    PlainAccount,
+};
+use database::{CacheState, State};
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use inspector::inspectors::TracerEip3155;
 use revm::{
@@ -14,17 +22,20 @@ use revm::{
         Cfg,
     },
     database_interface::EmptyDB,
-    primitives::{keccak256, Bytes, TxKind, B256},
+    primitives::{keccak256, Bytes, TxKind, B256, U256},
     specification::{eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId},
     Context, ExecuteCommitEvm, InspectCommitEvm, MainBuilder, MainContext,
 };
+use serde::Serialize;
 use serde_json::json;
-use statetest_types::{SpecName, Test, TestSuite};
+use statetest_types::{SpecName, Test, TestSuite, TxPartIndices};
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     fmt::Debug,
-    io::stderr,
+    fs,
+    io::{stderr, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -34,6 +45,177 @@ use std::{
 };
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultFiller {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shouldnotexist: Option<String>,
+}
+
+pub fn shouldnotexist() -> Option<String> {
+    Some("1".to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectFiller {
+    pub indexes: TxPartIndices,
+    pub network: Vec<String>,
+    pub result: HashMap<String, ResultFiller>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectWrapper {
+    pub expect: Vec<ExpectFiller>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialFiller {
+    pub test_name: String,
+    #[serde(flatten)]
+    pub test: HashMap<String, ExpectWrapper>,
+}
+
+pub fn u64_to_padded_hex(value: u64) -> String {
+    let hex = format!("{:x}", value);
+    let len = hex.len();
+    let padded_len = if len % 2 == 0 { len } else { len + 1 };
+    format!("0x{:0>width$}", hex, width = padded_len)
+}
+
+pub fn u256_to_padded_hex(value: U256) -> String {
+    let hex = format!("{:x}", value);
+    let len = hex.len();
+    let padded_len = if len % 2 == 0 { len } else { len + 1 };
+    format!("0x{:0>width$}", hex, width = padded_len)
+}
+
+impl PartialFiller {
+    pub fn from_state_cache(
+        cache_state: CacheState,
+        test_name: String,
+        network: String,
+        indexes: TxPartIndices,
+    ) -> Self {
+        let mut result: HashMap<String, ResultFiller> = HashMap::new();
+
+        for (address, CacheAccount { account, status }) in cache_state.accounts {
+            let address = address.to_string();
+
+            // - `LoadedNotExisting`: the account has been loaded but does not exist.
+            // - `Loaded`: the account has been loaded and exists.
+            // - `LoadedEmptyEIP161`: the account is loaded and empty, as per EIP-161.
+            // - `InMemoryChange`: there are changes in the account that exist only in memory.
+            // - `Changed`: the account has been modified.
+            // - `Destroyed`: the account has been destroyed.
+            // - `DestroyedChanged`: the account has been destroyed and then modified.
+            // - `DestroyedAgain`: the account has been destroyed again.
+            match status {
+                InMemoryChange | Loaded | LoadedEmptyEIP161 | Changed | DestroyedChanged => {
+                    if let Some(PlainAccount {
+                        info,
+                        storage: plain_storage,
+                    }) = account
+                    {
+                        let balance = Some(u256_to_padded_hex(info.balance));
+                        let nonce = Some(u64_to_padded_hex(info.nonce));
+                        let code = info.code.map(|bytecode| match bytecode {
+                            Bytecode::LegacyAnalyzed(x) => x.bytecode().to_string(),
+                            Bytecode::Eof(_) | Bytecode::Eip7702(_) => {
+                                panic!("Unexpected bytecode")
+                            }
+                        });
+                        let mut storage: HashMap<String, String> = HashMap::new();
+
+                        for (slot, value) in plain_storage {
+                            let slot = u256_to_padded_hex(slot);
+                            let value = u256_to_padded_hex(value);
+
+                            storage.insert(slot, value);
+                        }
+
+                        result.insert(
+                            address,
+                            ResultFiller {
+                                nonce,
+                                balance,
+                                code,
+                                storage: Some(storage),
+                                shouldnotexist: None,
+                            },
+                        );
+                    } else {
+                        // TODO: Double check this part. Maybe it means the account
+                        // shouldn't exist.
+                        continue;
+                    }
+                }
+
+                LoadedNotExisting | Destroyed | DestroyedAgain => {
+                    result.insert(
+                        address,
+                        ResultFiller {
+                            nonce: None,
+                            balance: None,
+                            code: None,
+                            storage: None,
+                            shouldnotexist: shouldnotexist(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let original_filename = Path::new(&test_name)
+            .file_stem()
+            .expect("Failed to extract filename")
+            .to_string_lossy()
+            .to_string();
+
+        let mut test = HashMap::new();
+
+        let expect_wrapper = ExpectWrapper {
+            expect: vec![ExpectFiller {
+                indexes,
+                network: vec![network],
+                result,
+            }],
+        };
+
+        test.insert(original_filename, expect_wrapper);
+
+        PartialFiller { test_name, test }
+    }
+
+    pub fn print_json(
+        cache_state: CacheState,
+        test_name: &str,
+        network: &SpecName,
+        indexes: TxPartIndices,
+    ) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&PartialFiller::from_state_cache(
+                cache_state,
+                test_name.to_string(),
+                network.sup_network(),
+                indexes
+            ))
+            .unwrap()
+        );
+    }
+}
 
 #[derive(Debug, Error)]
 #[error("Path: {path}\nName: {name}\nError: {kind}")]
