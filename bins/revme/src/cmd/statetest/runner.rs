@@ -638,6 +638,14 @@ pub fn execute_test_suite(
 
                     let spec = cfg.spec();
                     let db = evm.data.ctx.journaled_state.database;
+
+                    PartialFiller::print_json(
+                        db.cache.clone(),
+                        &path,
+                        &spec_name,
+                        test.indexes.clone(),
+                    );
+
                     // Dump state and traces if test failed
                     let output = check_evm_execution(
                         &test,
