@@ -198,7 +198,7 @@ impl PartialFiller {
         PartialFiller { test_name, test }
     }
 
-    pub fn print_json(
+    pub fn _print_json(
         cache_state: CacheState,
         test_name: &str,
         network: &SpecName,
@@ -214,6 +214,44 @@ impl PartialFiller {
             ))
             .unwrap()
         );
+    }
+
+    pub fn create_json(
+        cache: CacheState,
+        path: &str,
+        spec_name: &SpecName,
+        indexes: TxPartIndices,
+    ) {
+        let filler =
+            Self::from_state_cache(cache, path.to_string(), spec_name.sup_network(), indexes);
+
+        let json = serde_json::to_string_pretty(&filler).expect("Failed to serialize JSON");
+
+        let original_filename = Path::new(path)
+            .file_stem()
+            .expect("Failed to extract filename")
+            .to_string_lossy();
+
+        let prefix = if path.contains("Pyspecs") { "py_" } else { "" };
+        let mut counter = 0;
+        let mut new_filename = format!("{}{}Filler_{}.json", prefix, original_filename, counter);
+
+        // this was arbitrarily chosen, it doesn't matter, can be anything
+        let output_dir = Path::new("output_jsons");
+        fs::create_dir_all(output_dir).expect("Failed to create output directory");
+
+        let mut file_path = output_dir.join(&new_filename);
+        while file_path.exists() {
+            counter += 1;
+            new_filename = format!("{}{}Filler_{}.json", prefix, original_filename, counter);
+            file_path = output_dir.join(&new_filename);
+        }
+
+        let mut file = fs::File::create(&file_path).expect("Failed to create file");
+        file.write_all(json.as_bytes())
+            .expect("Failed to write to file");
+
+        println!("Written JSON to {}", file_path.display());
     }
 }
 
@@ -639,7 +677,7 @@ pub fn execute_test_suite(
                     let spec = cfg.spec();
                     let db = evm.data.ctx.journaled_state.database;
 
-                    PartialFiller::print_json(
+                    PartialFiller::create_json(
                         db.cache.clone(),
                         &path,
                         &spec_name,
