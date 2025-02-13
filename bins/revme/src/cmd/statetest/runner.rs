@@ -26,7 +26,7 @@ use revm::{
     specification::{eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId},
     Context, ExecuteCommitEvm, InspectCommitEvm, MainBuilder, MainContext,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use statetest_types::{SpecName, Test, TestSuite, TxPartIndices};
 
@@ -35,7 +35,7 @@ use std::{
     convert::Infallible,
     fmt::Debug,
     fs,
-    io::{stderr, Write},
+    io::{stderr, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -46,7 +46,7 @@ use std::{
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultFiller {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,7 +65,7 @@ pub fn shouldnotexist() -> Option<String> {
     Some("1".to_string())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpectFiller {
     pub indexes: TxPartIndices,
@@ -73,7 +73,7 @@ pub struct ExpectFiller {
     pub result: HashMap<String, ResultFiller>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpectWrapper {
     pub expect: Vec<ExpectFiller>,
@@ -252,6 +252,68 @@ impl PartialFiller {
             .expect("Failed to write to file");
 
         println!("Written JSON to {}", file_path.display());
+
+        if prefix.is_empty() {
+            Self::merge_json_files(output_dir, path, &original_filename);
+        }
+    }
+
+    pub fn merge_json_files(output_dir: &Path, original_path: &str, base_name: &str) {
+        let main_file_path = output_dir.join(format!("{}Filler.json", base_name));
+        let mut merged_expect: HashMap<String, ExpectWrapper> = HashMap::new();
+        let mut files_to_delete = Vec::new();
+
+        // Find all matching files (baseNameFiller.json and baseNameFiller_*.json)
+        let entries = fs::read_dir(output_dir).expect("Failed to read output directory");
+        for entry in entries {
+            let entry = entry.expect("Failed to read directory entry");
+            let path = entry.path();
+            let filename = path.file_name().unwrap().to_string_lossy();
+
+            if filename.starts_with(&format!("{}Filler", base_name)) {
+                let mut file_content = String::new();
+                let mut file = fs::File::open(&path).expect("Failed to open JSON file");
+                file.read_to_string(&mut file_content)
+                    .expect("Failed to read JSON file");
+
+                if let Ok(parsed_json) = serde_json::from_str::<PartialFiller>(&file_content) {
+                    for (key, expect_wrapper) in parsed_json.test {
+                        merged_expect
+                            .entry(key)
+                            .and_modify(|existing_wrapper| {
+                                existing_wrapper
+                                    .expect
+                                    .extend(expect_wrapper.clone().expect);
+                            })
+                            .or_insert(expect_wrapper);
+                    }
+                    files_to_delete.push(path.clone());
+                }
+            }
+        }
+
+        // Write the merged result back to baseNameFiller.json
+        let merged_filler = PartialFiller {
+            test_name: original_path.to_string(),
+            test: merged_expect,
+        };
+
+        let merged_json =
+            serde_json::to_string_pretty(&merged_filler).expect("Failed to serialize merged JSON");
+
+        let mut main_file = fs::File::create(&main_file_path).expect("Failed to create main file");
+        main_file
+            .write_all(merged_json.as_bytes())
+            .expect("Failed to write merged JSON");
+
+        // Delete all the numbered files except the main one
+        for file in files_to_delete {
+            if file != main_file_path {
+                fs::remove_file(file).expect("Failed to delete file");
+            }
+        }
+
+        println!("Merged JSON into {}", main_file_path.display());
     }
 }
 
