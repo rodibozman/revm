@@ -101,6 +101,8 @@ pub fn u256_to_padded_hex(value: U256) -> String {
     format!("0x{:0>width$}", hex, width = padded_len)
 }
 
+const ZERO_BYTES_STR: &str = "0x000000000000000000000000000000000000000000000000000000000000000000";
+
 impl PartialFiller {
     pub fn from_state_cache(
         cache_state: CacheState,
@@ -131,7 +133,14 @@ impl PartialFiller {
                         let balance = Some(u256_to_padded_hex(info.balance));
                         let nonce = Some(u64_to_padded_hex(info.nonce));
                         let code = info.code.map(|bytecode| match bytecode {
-                            Bytecode::LegacyAnalyzed(x) => x.bytecode().to_string(),
+                            Bytecode::LegacyAnalyzed(x) => {
+                                let bytecode = x.bytecode().to_string();
+                                if bytecode == ZERO_BYTES_STR {
+                                    None
+                                } else {
+                                    Some(bytecode)
+                                }
+                            }
                             Bytecode::Eof(_) | Bytecode::Eip7702(_) => {
                                 panic!("Unexpected bytecode")
                             }
@@ -150,7 +159,7 @@ impl PartialFiller {
                             ResultFiller {
                                 nonce,
                                 balance,
-                                code,
+                                code: code.unwrap(),
                                 storage: Some(storage),
                                 shouldnotexist: None,
                             },
