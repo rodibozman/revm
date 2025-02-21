@@ -749,12 +749,14 @@ pub fn execute_test_suite(
                     let spec = cfg.spec();
                     let db = evm.data.ctx.journaled_state.database;
 
-                    PartialFiller::create_json(
-                        db.cache.clone(),
-                        &path,
-                        &spec_name,
-                        test.indexes.clone(),
-                    );
+                    if spec_name == SpecName::Cancun || spec_name == SpecName::Shanghai {
+                        PartialFiller::create_json(
+                            db.cache.clone(),
+                            &path,
+                            &spec_name,
+                            test.indexes.clone(),
+                        );
+                    }
 
                     // Dump state and traces if test failed
                     let output = check_evm_execution(
