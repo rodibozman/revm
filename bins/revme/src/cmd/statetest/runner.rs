@@ -70,6 +70,7 @@ pub fn shouldnotexist() -> Option<String> {
 pub struct ExpectFiller {
     pub indexes: TxPartIndices,
     pub network: Vec<String>,
+    pub expect_exception: Option<String>,
     pub result: HashMap<String, ResultFiller>,
 }
 
@@ -109,8 +110,32 @@ impl PartialFiller {
         test_name: String,
         network: String,
         indexes: TxPartIndices,
+        expect_exception: Option<String>,
     ) -> Self {
         let mut result: HashMap<String, ResultFiller> = HashMap::new();
+
+        if expect_exception.is_some() {
+            let original_filename = Path::new(&test_name)
+                .file_stem()
+                .expect("Failed to extract filename")
+                .to_string_lossy()
+                .to_string();
+
+            let mut test = HashMap::new();
+
+            let expect_wrapper = ExpectWrapper {
+                expect: vec![ExpectFiller {
+                    indexes,
+                    network: vec![network],
+                    result,
+                    expect_exception,
+                }],
+            };
+
+            test.insert(original_filename, expect_wrapper);
+
+            return PartialFiller { test_name, test };
+        }
 
         for (address, CacheAccount { account, status }) in cache_state.accounts {
             let address = address.to_string();
@@ -200,6 +225,7 @@ impl PartialFiller {
                 indexes,
                 network: vec![network],
                 result,
+                expect_exception,
             }],
         };
 
@@ -213,6 +239,7 @@ impl PartialFiller {
         test_name: &str,
         network: &SpecName,
         indexes: TxPartIndices,
+        expect_exception: Option<String>,
     ) {
         println!(
             "{}",
@@ -220,7 +247,8 @@ impl PartialFiller {
                 cache_state,
                 test_name.to_string(),
                 network.sup_network(),
-                indexes
+                indexes,
+                expect_exception,
             ))
             .unwrap()
         );
@@ -231,9 +259,15 @@ impl PartialFiller {
         path: &str,
         spec_name: &SpecName,
         indexes: TxPartIndices,
+        expect_exception: Option<String>,
     ) {
-        let filler =
-            Self::from_state_cache(cache, path.to_string(), spec_name.sup_network(), indexes);
+        let filler = Self::from_state_cache(
+            cache,
+            path.to_string(),
+            spec_name.sup_network(),
+            indexes,
+            expect_exception,
+        );
 
         let json = serde_json::to_string_pretty(&filler).expect("Failed to serialize JSON");
 
@@ -764,6 +798,7 @@ pub fn execute_test_suite(
                             &path,
                             &spec_name,
                             test.indexes.clone(),
+                            test.expect_exception.clone(),
                         );
                     }
 
