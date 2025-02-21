@@ -237,10 +237,19 @@ impl PartialFiller {
 
         let json = serde_json::to_string_pretty(&filler).expect("Failed to serialize JSON");
 
-        let original_filename = Path::new(path)
+        let path_obj = Path::new(path);
+        let original_filename = path_obj
             .file_stem()
             .expect("Failed to extract filename")
             .to_string_lossy();
+
+        let parent_folder = path_obj
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let original_filename = format!("{}_{}", parent_folder, original_filename);
 
         let prefix = if path.contains("Pyspecs") { "py_" } else { "" };
         let mut counter = 0;
