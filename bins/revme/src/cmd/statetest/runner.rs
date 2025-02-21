@@ -124,7 +124,8 @@ impl PartialFiller {
             // - `DestroyedChanged`: the account has been destroyed and then modified.
             // - `DestroyedAgain`: the account has been destroyed again.
             match status {
-                InMemoryChange | Loaded | LoadedEmptyEIP161 | Changed | DestroyedChanged => {
+                InMemoryChange => continue,
+                Loaded | LoadedEmptyEIP161 | Changed | DestroyedChanged => {
                     if let Some(PlainAccount {
                         info,
                         storage: plain_storage,
