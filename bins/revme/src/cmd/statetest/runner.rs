@@ -2,7 +2,15 @@ use super::{
     merkle_trie::{log_rlp_hash, state_merkle_trie_root},
     utils::recover_address,
 };
-use database::State;
+use database::{
+    states::CacheAccount,
+    AccountStatus::{
+        Changed, Destroyed, DestroyedAgain, DestroyedChanged, InMemoryChange, Loaded,
+        LoadedEmptyEIP161, LoadedNotExisting,
+    },
+    PlainAccount,
+};
+use database::{CacheState, State};
 use indicatif::{ProgressBar, ProgressDrawTarget};
 use inspector::inspectors::TracerEip3155;
 use revm::{
@@ -14,17 +22,20 @@ use revm::{
         Cfg,
     },
     database_interface::EmptyDB,
-    primitives::{keccak256, Bytes, TxKind, B256},
+    primitives::{keccak256, Bytes, TxKind, B256, U256},
     specification::{eip4844::TARGET_BLOB_GAS_PER_BLOCK_CANCUN, hardfork::SpecId},
     Context, ExecuteCommitEvm, InspectCommitEvm, MainBuilder, MainContext,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use statetest_types::{SpecName, Test, TestSuite};
+use statetest_types::{SpecName, Test, TestSuite, TxPartIndices};
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     fmt::Debug,
-    io::stderr,
+    fs,
+    io::{stderr, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -34,6 +45,330 @@ use std::{
 };
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultFiller {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shouldnotexist: Option<String>,
+}
+
+pub fn shouldnotexist() -> Option<String> {
+    Some("1".to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectFiller {
+    pub indexes: TxPartIndices,
+    pub network: Vec<String>,
+    pub expect_exception: Option<String>,
+    pub result: HashMap<String, ResultFiller>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectWrapper {
+    pub expect: Vec<ExpectFiller>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialFiller {
+    pub test_name: String,
+    #[serde(flatten)]
+    pub test: HashMap<String, ExpectWrapper>,
+}
+
+pub fn u64_to_padded_hex(value: u64) -> String {
+    let hex = format!("{:x}", value);
+    let len = hex.len();
+    let padded_len = if len % 2 == 0 { len } else { len + 1 };
+    format!("0x{:0>width$}", hex, width = padded_len)
+}
+
+pub fn u256_to_padded_hex(value: U256) -> String {
+    let hex = format!("{:x}", value);
+    let len = hex.len();
+    let padded_len = if len % 2 == 0 { len } else { len + 1 };
+    format!("0x{:0>width$}", hex, width = padded_len)
+}
+
+const ZERO_BYTES_STR: &str = "0x000000000000000000000000000000000000000000000000000000000000000000";
+
+impl PartialFiller {
+    pub fn from_state_cache(
+        cache_state: CacheState,
+        test_name: String,
+        network: String,
+        indexes: TxPartIndices,
+        expect_exception: Option<String>,
+    ) -> Self {
+        let mut result: HashMap<String, ResultFiller> = HashMap::new();
+
+        if expect_exception.is_some() {
+            let original_filename = Path::new(&test_name)
+                .file_stem()
+                .expect("Failed to extract filename")
+                .to_string_lossy()
+                .to_string();
+
+            let mut test = HashMap::new();
+
+            let expect_wrapper = ExpectWrapper {
+                expect: vec![ExpectFiller {
+                    indexes,
+                    network: vec![network],
+                    result,
+                    expect_exception,
+                }],
+            };
+
+            test.insert(original_filename, expect_wrapper);
+
+            return PartialFiller { test_name, test };
+        }
+
+        for (address, CacheAccount { account, status }) in cache_state.accounts {
+            let address = address.to_string();
+
+            // - `LoadedNotExisting`: the account has been loaded but does not exist.
+            // - `Loaded`: the account has been loaded and exists.
+            // - `LoadedEmptyEIP161`: the account is loaded and empty, as per EIP-161.
+            // - `InMemoryChange`: there are changes in the account that exist only in memory.
+            // - `Changed`: the account has been modified.
+            // - `Destroyed`: the account has been destroyed.
+            // - `DestroyedChanged`: the account has been destroyed and then modified.
+            // - `DestroyedAgain`: the account has been destroyed again.
+            match status {
+                InMemoryChange => continue,
+                Loaded | LoadedEmptyEIP161 | Changed | DestroyedChanged => {
+                    if let Some(PlainAccount {
+                        info,
+                        storage: plain_storage,
+                    }) = account
+                    {
+                        let balance = Some(u256_to_padded_hex(info.balance));
+                        let nonce = Some(u64_to_padded_hex(info.nonce));
+                        let code = info.code.map(|bytecode| match bytecode {
+                            Bytecode::LegacyAnalyzed(x) => {
+                                let bytecode = x.bytecode().to_string();
+                                if bytecode == ZERO_BYTES_STR {
+                                    None
+                                } else {
+                                    Some(bytecode)
+                                }
+                            }
+                            Bytecode::Eof(_) | Bytecode::Eip7702(_) => {
+                                panic!("Unexpected bytecode")
+                            }
+                        });
+                        let mut storage: HashMap<String, String> = HashMap::new();
+
+                        for (slot, value) in plain_storage {
+                            let slot = u256_to_padded_hex(slot);
+                            let value = u256_to_padded_hex(value);
+
+                            storage.insert(slot, value);
+                        }
+
+                        result.insert(
+                            address,
+                            ResultFiller {
+                                nonce,
+                                balance,
+                                code: code.unwrap(),
+                                storage: Some(storage),
+                                shouldnotexist: None,
+                            },
+                        );
+                    } else {
+                        // TODO: Double check this part. Maybe it means the account
+                        // shouldn't exist.
+                        continue;
+                    }
+                }
+
+                LoadedNotExisting | Destroyed | DestroyedAgain => {
+                    result.insert(
+                        address,
+                        ResultFiller {
+                            nonce: None,
+                            balance: None,
+                            code: None,
+                            storage: None,
+                            shouldnotexist: shouldnotexist(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let original_filename = Path::new(&test_name)
+            .file_stem()
+            .expect("Failed to extract filename")
+            .to_string_lossy()
+            .to_string();
+
+        let mut test = HashMap::new();
+
+        let expect_wrapper = ExpectWrapper {
+            expect: vec![ExpectFiller {
+                indexes,
+                network: vec![network],
+                result,
+                expect_exception,
+            }],
+        };
+
+        test.insert(original_filename, expect_wrapper);
+
+        PartialFiller { test_name, test }
+    }
+
+    pub fn _print_json(
+        cache_state: CacheState,
+        test_name: &str,
+        network: &SpecName,
+        indexes: TxPartIndices,
+        expect_exception: Option<String>,
+    ) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&PartialFiller::from_state_cache(
+                cache_state,
+                test_name.to_string(),
+                network.sup_network(),
+                indexes,
+                expect_exception,
+            ))
+            .unwrap()
+        );
+    }
+
+    pub fn create_json(
+        cache: CacheState,
+        path: &str,
+        spec_name: &SpecName,
+        indexes: TxPartIndices,
+        expect_exception: Option<String>,
+    ) {
+        let filler = Self::from_state_cache(
+            cache,
+            path.to_string(),
+            spec_name.sup_network(),
+            indexes,
+            expect_exception,
+        );
+
+        let json = serde_json::to_string_pretty(&filler).expect("Failed to serialize JSON");
+
+        let path_obj = Path::new(path);
+        let original_filename = path_obj
+            .file_stem()
+            .expect("Failed to extract filename")
+            .to_string_lossy();
+
+        let parent_folder = path_obj
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let original_filename = format!("{}_{}", parent_folder, original_filename);
+
+        let prefix = if path.contains("Pyspecs") { "py_" } else { "" };
+        let mut counter = 0;
+        let mut new_filename = format!("{}{}Filler_{}.json", prefix, original_filename, counter);
+
+        // this was arbitrarily chosen, it doesn't matter, can be anything
+        let output_dir = Path::new("output_jsons");
+        fs::create_dir_all(output_dir).expect("Failed to create output directory");
+
+        let mut file_path = output_dir.join(&new_filename);
+        while file_path.exists() {
+            counter += 1;
+            new_filename = format!("{}{}Filler_{}.json", prefix, original_filename, counter);
+            file_path = output_dir.join(&new_filename);
+        }
+
+        let mut file = fs::File::create(&file_path).expect("Failed to create file");
+        file.write_all(json.as_bytes())
+            .expect("Failed to write to file");
+
+        println!("Written JSON to {}", file_path.display());
+
+        if prefix.is_empty() {
+            Self::merge_json_files(output_dir, path, &original_filename);
+        }
+    }
+
+    pub fn merge_json_files(output_dir: &Path, original_path: &str, base_name: &str) {
+        let main_file_path = output_dir.join(format!("{}Filler.json", base_name));
+        let mut merged_expect: HashMap<String, ExpectWrapper> = HashMap::new();
+        let mut files_to_delete = Vec::new();
+
+        // Find all matching files (baseNameFiller.json and baseNameFiller_*.json)
+        let entries = fs::read_dir(output_dir).expect("Failed to read output directory");
+        for entry in entries {
+            let entry = entry.expect("Failed to read directory entry");
+            let path = entry.path();
+            let filename = path.file_name().unwrap().to_string_lossy();
+
+            if filename.starts_with(&format!("{}Filler", base_name)) {
+                let mut file_content = String::new();
+                let mut file = fs::File::open(&path).expect("Failed to open JSON file");
+                file.read_to_string(&mut file_content)
+                    .expect("Failed to read JSON file");
+
+                if let Ok(parsed_json) = serde_json::from_str::<PartialFiller>(&file_content) {
+                    for (key, expect_wrapper) in parsed_json.test {
+                        merged_expect
+                            .entry(key)
+                            .and_modify(|existing_wrapper| {
+                                existing_wrapper
+                                    .expect
+                                    .extend(expect_wrapper.clone().expect);
+                            })
+                            .or_insert(expect_wrapper);
+                    }
+                    files_to_delete.push(path.clone());
+                }
+            }
+        }
+
+        // Write the merged result back to baseNameFiller.json
+        let merged_filler = PartialFiller {
+            test_name: original_path.to_string(),
+            test: merged_expect,
+        };
+
+        let merged_json =
+            serde_json::to_string_pretty(&merged_filler).expect("Failed to serialize merged JSON");
+
+        let mut main_file = fs::File::create(&main_file_path).expect("Failed to create main file");
+        main_file
+            .write_all(merged_json.as_bytes())
+            .expect("Failed to write merged JSON");
+
+        // Delete all the numbered files except the main one
+        for file in files_to_delete {
+            if file != main_file_path {
+                fs::remove_file(file).expect("Failed to delete file");
+            }
+        }
+
+        println!("Merged JSON into {}", main_file_path.display());
+    }
+}
 
 #[derive(Debug, Error)]
 #[error("Path: {path}\nName: {name}\nError: {kind}")]
@@ -456,6 +791,17 @@ pub fn execute_test_suite(
 
                     let spec = cfg.spec();
                     let db = evm.data.ctx.journaled_state.database;
+
+                    if spec_name == SpecName::Cancun || spec_name == SpecName::Shanghai {
+                        PartialFiller::create_json(
+                            db.cache.clone(),
+                            &path,
+                            &spec_name,
+                            test.indexes.clone(),
+                            test.expect_exception.clone(),
+                        );
+                    }
+
                     // Dump state and traces if test failed
                     let output = check_evm_execution(
                         &test,
@@ -530,7 +876,7 @@ pub fn execute_test_suite(
 
 pub fn run(
     test_files: Vec<PathBuf>,
-    mut single_thread: bool,
+    mut _single_thread: bool,
     trace: bool,
     mut print_outcome: bool,
     keep_going: bool,
@@ -541,7 +887,7 @@ pub fn run(
     }
     // `print_outcome` or trace implies single_thread
     if print_outcome {
-        single_thread = true;
+        _single_thread = true;
     }
     let n_files = test_files.len();
 
@@ -553,10 +899,7 @@ pub fn run(
     let queue = Arc::new(Mutex::new((0usize, test_files)));
     let elapsed = Arc::new(Mutex::new(std::time::Duration::ZERO));
 
-    let num_threads = match (single_thread, std::thread::available_parallelism()) {
-        (true, _) | (false, Err(_)) => 1,
-        (false, Ok(n)) => n.get(),
-    };
+    let num_threads = 1;
     let num_threads = num_threads.min(n_files);
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {

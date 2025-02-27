@@ -1,3 +1,5 @@
+use std::fmt;
+
 use revm::specification::hardfork::SpecId;
 use serde::Deserialize;
 
@@ -31,6 +33,38 @@ pub enum SpecName {
     Unknown,
 }
 
+impl fmt::Display for SpecName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            SpecName::Frontier => "Frontier",
+            SpecName::FrontierToHomesteadAt5 => "FrontierToHomesteadAt5",
+            SpecName::Homestead => "Homestead",
+            SpecName::HomesteadToDaoAt5 => "HomesteadToDaoAt5",
+            SpecName::HomesteadToEIP150At5 => "HomesteadToEIP150At5",
+            SpecName::EIP150 => "EIP150",
+            SpecName::EIP158 => "EIP158",
+            SpecName::EIP158ToByzantiumAt5 => "EIP158ToByzantiumAt5",
+            SpecName::Byzantium => "Byzantium",
+            SpecName::ByzantiumToConstantinopleAt5 => "ByzantiumToConstantinopleAt5",
+            SpecName::ByzantiumToConstantinopleFixAt5 => "ByzantiumToConstantinopleFixAt5",
+            SpecName::Constantinople => "Constantinople",
+            SpecName::ConstantinopleFix => "ConstantinopleFix",
+            SpecName::Istanbul => "Istanbul",
+            SpecName::Berlin => "Berlin",
+            SpecName::BerlinToLondonAt5 => "BerlinToLondonAt5",
+            SpecName::London => "London",
+            SpecName::Paris => "Paris",
+            SpecName::Merge => "Merge",
+            SpecName::Shanghai => "Shanghai",
+            SpecName::Cancun => "Cancun",
+            SpecName::Prague => "Prague",
+            SpecName::Osaka => "Osaka",
+            SpecName::Unknown => "Unknown",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 impl SpecName {
     /// Converts to a [SpecId].
     pub fn to_spec_id(&self) -> SpecId {
@@ -56,5 +90,9 @@ impl SpecName {
             }
             Self::Unknown => panic!("Unknown spec"),
         }
+    }
+
+    pub fn sup_network(&self) -> String {
+        ">=".to_string() + &self.to_string()
     }
 }
