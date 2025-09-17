@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.0.0](https://github.com/rodibozman/revm/compare/revm-context-v9.0.2...revm-context-v10.0.0) - 2025-09-17
+
+### Added
+
+- send bytecode with call input ([#2963](https://github.com/rodibozman/revm/pull/2963))
+- *(op-revm)* Add an option to disable "fee-charge" on `op-revm` ([#2980](https://github.com/rodibozman/revm/pull/2980))
+- *(revme)* ef blockchain tests cli ([#2935](https://github.com/rodibozman/revm/pull/2935))
+
+### Fixed
+
+- Apply spelling corrections from PRs #2926, #2915, #2908 ([#2978](https://github.com/rodibozman/revm/pull/2978))
+- FrameStack mark push/end_init as unsafe ([#2929](https://github.com/rodibozman/revm/pull/2929))
+- skip cold load on oog ([#2903](https://github.com/rodibozman/revm/pull/2903))
+
+### Other
+
+- prealloc few frames ([#2965](https://github.com/rodibozman/revm/pull/2965))
+- add SECURITY.md ([#2956](https://github.com/rodibozman/revm/pull/2956))
+- *(cleanup)* Remove EIP-7918 related functions and EIP file  ([#2925](https://github.com/rodibozman/revm/pull/2925))
+- cargo update ([#2930](https://github.com/rodibozman/revm/pull/2930))
+
 ## [9.0.2](https://github.com/bluealloy/revm/compare/revm-context-v9.0.1...revm-context-v9.0.2) - 2025-08-23
 
 ### Fixed
