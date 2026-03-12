@@ -1,13 +1,11 @@
 use auto_impl::auto_impl;
+use context::result::ErrorBox;
 use context::{Cfg, LocalContextTr};
 use context_interface::{ContextTr, JournalTr};
 use interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult};
 use precompile::{PrecompileError, PrecompileSpecId, Precompiles};
 use primitives::{hardfork::SpecId, Address, Bytes};
-use std::{
-    boxed::Box,
-    string::{String, ToString},
-};
+use std::{boxed::Box, string::ToString};
 
 /// Provider for precompiled contracts in the EVM.
 #[auto_impl(&mut, Box)]
@@ -25,7 +23,7 @@ pub trait PrecompileProvider<CTX: ContextTr> {
         &mut self,
         context: &mut CTX,
         inputs: &CallInputs,
-    ) -> Result<Option<Self::Output>, String>;
+    ) -> Result<Option<Self::Output>, ErrorBox>;
 
     /// Get the warm addresses.
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>>;
@@ -90,7 +88,7 @@ impl<CTX: ContextTr> PrecompileProvider<CTX> for EthPrecompiles {
         &mut self,
         context: &mut CTX,
         inputs: &CallInputs,
-    ) -> Result<Option<InterpreterResult>, String> {
+    ) -> Result<Option<InterpreterResult>, ErrorBox> {
         let Some(precompile) = self.precompiles.get(&inputs.bytecode_address) else {
             return Ok(None);
         };

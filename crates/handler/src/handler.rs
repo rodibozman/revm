@@ -5,7 +5,7 @@ use crate::{
     validation, EvmTr, FrameResult, ItemOrResult,
 };
 use context::{
-    result::{ExecutionResult, FromStringError},
+    result::{ExecutionResult, FromError},
     LocalContextTr,
 };
 use context_interface::{
@@ -26,7 +26,7 @@ pub trait EvmTrError<EVM: EvmTr>:
     + From<InvalidHeader>
     + From<<<EVM::Context as ContextTr>::Db as Database>::Error>
     + From<ContextError<<<EVM::Context as ContextTr>::Db as Database>::Error>>
-    + FromStringError
+    + FromError
 {
 }
 
@@ -36,7 +36,7 @@ impl<
             + From<InvalidHeader>
             + From<<<EVM::Context as ContextTr>::Db as Database>::Error>
             + From<ContextError<<<EVM::Context as ContextTr>::Db as Database>::Error>>
-            + FromStringError,
+            + FromError,
     > EvmTrError<EVM> for T
 {
 }

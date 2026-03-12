@@ -52,10 +52,14 @@ where
         &mut self,
         context: &mut CTX,
         inputs: &CallInputs,
-    ) -> Result<Option<Self::Output>, String> {
+    ) -> Result<Option<Self::Output>, revm::context::result::ErrorBox> {
         // Check if this is our custom precompile
         if inputs.bytecode_address == CUSTOM_PRECOMPILE_ADDRESS {
-            return Ok(Some(run_custom_precompile(context, inputs)?));
+            return Ok(Some(run_custom_precompile(context, inputs).map_err(
+                |e| -> revm::context::result::ErrorBox {
+                    std::sync::Arc::new(revm::context::result::StringError(e))
+                },
+            )?));
         }
 
         // Otherwise, delegate to standard Ethereum precompiles

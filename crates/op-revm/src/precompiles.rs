@@ -11,7 +11,7 @@ use revm::{
     },
     primitives::{hardfork::SpecId, Address, OnceLock},
 };
-use std::{boxed::Box, string::String};
+use std::boxed::Box;
 
 /// Optimism precompile provider
 #[derive(Debug, Clone)]
@@ -140,7 +140,7 @@ where
         &mut self,
         context: &mut CTX,
         inputs: &CallInputs,
-    ) -> Result<Option<Self::Output>, String> {
+    ) -> Result<Option<Self::Output>, revm::context::result::ErrorBox> {
         self.inner.run(context, inputs)
     }
 

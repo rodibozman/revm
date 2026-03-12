@@ -13,7 +13,7 @@ use revm::{
     },
     context_interface::{
         context::take_error,
-        result::{EVMError, ExecutionResult, FromStringError, ResultGas},
+        result::{EVMError, ExecutionResult, FromError, ResultGas},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
@@ -69,7 +69,7 @@ impl<DB, TX> IsTxError for EVMError<DB, TX> {
 impl<EVM, ERROR, FRAME> Handler for OpHandler<EVM, ERROR, FRAME>
 where
     EVM: EvmTr<Context: OpContextTr, Frame = FRAME>,
-    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromError + IsTxError,
     // TODO `FrameResult` should be a generic trait.
     // TODO `FrameInit` should be a generic.
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
@@ -444,7 +444,7 @@ where
         Frame = EthFrame<EthInterpreter>,
         Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
     >,
-    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromError + IsTxError,
 {
     type IT = EthInterpreter;
 }

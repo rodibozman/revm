@@ -2,11 +2,11 @@
 //! Context trait and related types.
 pub use crate::journaled_state::StateLoad;
 use crate::{
-    result::FromStringError, Block, Cfg, Database, Host, JournalTr, LocalContextTr, Transaction,
+    result::{ErrorBox, FromError},
+    Block, Cfg, Database, Host, JournalTr, LocalContextTr, Transaction,
 };
 use auto_impl::auto_impl;
 use primitives::StorageValue;
-use std::string::String;
 
 /// Trait that defines the context of the EVM execution.
 ///
@@ -162,13 +162,50 @@ pub trait ContextTr: Host {
 }
 
 /// Inner Context error used for Interpreter to set error without returning it from instruction
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug)]
 pub enum ContextError<DbError> {
     /// Database error.
     Db(DbError),
-    /// Custom string error.
-    Custom(String),
+    /// Custom error.
+    Custom(ErrorBox),
+}
+
+impl<DbError: PartialEq> PartialEq for ContextError<DbError> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Db(a), Self::Db(b)) => a == b,
+            (Self::Custom(_), Self::Custom(_)) => false,
+            _ => false,
+        }
+    }
+}
+
+impl<DbError: Eq> Eq for ContextError<DbError> {}
+
+impl<DbError: core::hash::Hash> core::hash::Hash for ContextError<DbError> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        if let Self::Db(e) = self {
+            e.hash(state);
+        }
+    }
+}
+
+impl<DbError: Ord> PartialOrd for ContextError<DbError> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<DbError: Ord> Ord for ContextError<DbError> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        match (self, other) {
+            (Self::Db(a), Self::Db(b)) => a.cmp(b),
+            (Self::Db(_), Self::Custom(_)) => core::cmp::Ordering::Less,
+            (Self::Custom(_), Self::Db(_)) => core::cmp::Ordering::Greater,
+            (Self::Custom(_), Self::Custom(_)) => core::cmp::Ordering::Equal,
+        }
+    }
 }
 
 /// Take (drain) the stored context error and map it into an external error type.
@@ -178,18 +215,50 @@ pub enum ContextError<DbError> {
 #[inline]
 pub fn take_error<E, DbError>(err: &mut Result<(), ContextError<DbError>>) -> Result<(), E>
 where
-    E: From<DbError> + FromStringError,
+    E: From<DbError> + FromError,
 {
     match core::mem::replace(err, Ok(())) {
         Err(ContextError::Db(e)) => Err(e.into()),
-        Err(ContextError::Custom(e)) => Err(E::from_string(e)),
+        Err(ContextError::Custom(e)) => Err(E::from_error(e)),
         Ok(()) => Ok(()),
     }
 }
 
-impl<DbError> FromStringError for ContextError<DbError> {
-    fn from_string(value: String) -> Self {
+impl<DbError> FromError for ContextError<DbError> {
+    fn from_error(value: ErrorBox) -> Self {
         Self::Custom(value)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<DbError: serde::Serialize> serde::Serialize for ContextError<DbError> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        enum Helper<'a, D> {
+            Db(&'a D),
+            Custom(String),
+        }
+        let h = match self {
+            Self::Db(e) => Helper::Db(e),
+            Self::Custom(e) => Helper::Custom(e.to_string()),
+        };
+        h.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, DbError: serde::Deserialize<'de>> serde::Deserialize<'de> for ContextError<DbError> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum Helper<D> {
+            Db(D),
+            Custom(String),
+        }
+        let h = Helper::<DbError>::deserialize(deserializer)?;
+        Ok(match h {
+            Helper::Db(e) => Self::Db(e),
+            Helper::Custom(s) => Self::Custom(std::sync::Arc::new(crate::result::StringError(s))),
+        })
     }
 }
 

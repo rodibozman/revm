@@ -12,7 +12,14 @@ use core::fmt::{self, Debug};
 use database_interface::DBErrorMarker;
 use primitives::{Address, Bytes, Log, U256};
 use state::EvmState;
-use std::{borrow::Cow, boxed::Box, string::String, vec::Vec};
+use std::{borrow::Cow, boxed::Box, string::String, sync::Arc, vec::Vec};
+
+/// A type-erased, cloneable, thread-safe error.
+///
+/// Used by [`EVMError::Custom`], [`ContextError::Custom`], [`PrecompileError::Fatal`],
+/// and [`HaltReason::PrecompileErrorWithContext`] to preserve the original error type
+/// while remaining `Clone + Send + Sync`.
+pub type ErrorBox = Arc<dyn core::error::Error + Send + Sync>;
 
 /// Trait for the halt reason.
 pub trait HaltReasonTr: Clone + Debug + PartialEq + Eq + From<HaltReason> {}
@@ -532,8 +539,7 @@ impl fmt::Display for Output {
 }
 
 /// Main EVM error
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
 pub enum EVMError<DBError, TransactionError = InvalidTransaction> {
     /// Transaction validation error
     Transaction(TransactionError),
@@ -544,7 +550,68 @@ pub enum EVMError<DBError, TransactionError = InvalidTransaction> {
     /// Custom error
     ///
     /// Useful for handler registers where custom logic would want to return their own custom error.
-    Custom(String),
+    Custom(ErrorBox),
+}
+
+impl<DBError: PartialEq, TransactionError: PartialEq> PartialEq
+    for EVMError<DBError, TransactionError>
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Transaction(a), Self::Transaction(b)) => a == b,
+            (Self::Header(a), Self::Header(b)) => a == b,
+            (Self::Database(a), Self::Database(b)) => a == b,
+            // Custom errors holding type-erased `Arc<dyn Error>` are never equal.
+            (Self::Custom(_), Self::Custom(_)) => false,
+            _ => false,
+        }
+    }
+}
+
+impl<DBError: Eq, TransactionError: Eq> Eq for EVMError<DBError, TransactionError> {}
+
+#[cfg(feature = "serde")]
+impl<DBError: serde::Serialize, TransactionError: serde::Serialize> serde::Serialize
+    for EVMError<DBError, TransactionError>
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        enum Helper<'a, D, T> {
+            Transaction(&'a T),
+            Header(&'a InvalidHeader),
+            Database(&'a D),
+            Custom(String),
+        }
+        let h = match self {
+            Self::Transaction(e) => Helper::Transaction(e),
+            Self::Header(e) => Helper::Header(e),
+            Self::Database(e) => Helper::Database(e),
+            Self::Custom(e) => Helper::Custom(e.to_string()),
+        };
+        h.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, DBError: serde::Deserialize<'de>, TransactionError: serde::Deserialize<'de>>
+    serde::Deserialize<'de> for EVMError<DBError, TransactionError>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum Helper<D, T> {
+            Transaction(T),
+            Header(InvalidHeader),
+            Database(D),
+            Custom(String),
+        }
+        let h = Helper::<DBError, TransactionError>::deserialize(deserializer)?;
+        Ok(match h {
+            Helper::Transaction(e) => Self::Transaction(e),
+            Helper::Header(e) => Self::Header(e),
+            Helper::Database(e) => Self::Database(e),
+            Helper::Custom(s) => Self::Custom(Arc::new(StringError(s))),
+        })
+    }
 }
 
 impl<DBError, TransactionValidationErrorT> From<ContextError<DBError>>
@@ -564,14 +631,34 @@ impl<DBError: DBErrorMarker, TX> From<DBError> for EVMError<DBError, TX> {
     }
 }
 
-/// Trait for converting a string to an [`EVMError::Custom`] error.
-pub trait FromStringError {
-    /// Converts a string to an [`EVMError::Custom`] error.
-    fn from_string(value: String) -> Self;
+/// A simple string-based error for wrapping plain messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringError(pub String);
+
+impl fmt::Display for StringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-impl<DB, TX> FromStringError for EVMError<DB, TX> {
-    fn from_string(value: String) -> Self {
+impl core::error::Error for StringError {}
+
+/// Trait for converting an error into an [`EVMError::Custom`] variant.
+pub trait FromError {
+    /// Converts a type-erased error into a Custom variant.
+    fn from_error(value: ErrorBox) -> Self;
+
+    /// Convenience method that wraps a string into a Custom variant.
+    fn from_string(value: String) -> Self
+    where
+        Self: Sized,
+    {
+        Self::from_error(Arc::new(StringError(value)))
+    }
+}
+
+impl<DB, TX> FromError for EVMError<DB, TX> {
+    fn from_error(value: ErrorBox) -> Self {
         Self::Custom(value)
     }
 }
@@ -592,7 +679,7 @@ impl<DBError, TransactionValidationErrorT> EVMError<DBError, TransactionValidati
             Self::Transaction(e) => EVMError::Transaction(e),
             Self::Header(e) => EVMError::Header(e),
             Self::Database(e) => EVMError::Database(op(e)),
-            Self::Custom(e) => EVMError::Custom(e),
+            Self::Custom(e) => EVMError::Custom(e.clone()),
         }
     }
 }
@@ -608,7 +695,7 @@ where
             Self::Transaction(e) => Some(e),
             Self::Header(e) => Some(e),
             Self::Database(e) => Some(e),
-            Self::Custom(_) => None,
+            Self::Custom(e) => Some(e.as_ref()),
         }
     }
 }
@@ -624,7 +711,7 @@ where
             Self::Transaction(e) => write!(f, "transaction validation error: {e}"),
             Self::Header(e) => write!(f, "header validation error: {e}"),
             Self::Database(e) => write!(f, "database error: {e}"),
-            Self::Custom(e) => f.write_str(e),
+            Self::Custom(e) => write!(f, "{e}"),
         }
     }
 }
@@ -911,8 +998,7 @@ impl fmt::Display for SuccessReason {
 /// Indicates that the EVM has experienced an exceptional halt.
 ///
 /// This causes execution to immediately end with all gas being consumed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
 pub enum HaltReason {
     /// Out of gas error.
     OutOfGas(OutOfGasError),
@@ -935,7 +1021,7 @@ pub enum HaltReason {
     /// Precompile error.
     PrecompileError,
     /// Precompile error with message from context.
-    PrecompileErrorWithContext(String),
+    PrecompileErrorWithContext(ErrorBox),
     /// Nonce overflow.
     NonceOverflow,
     /// Create init code size exceeds limit (runtime).
@@ -956,6 +1042,29 @@ pub enum HaltReason {
     OutOfFunds,
     /// Call is too deep.
     CallTooDeep,
+}
+
+impl PartialEq for HaltReason {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::OutOfGas(a), Self::OutOfGas(b)) => a == b,
+            (Self::PrecompileErrorWithContext(a), Self::PrecompileErrorWithContext(b)) => {
+                a.to_string() == b.to_string()
+            }
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+impl Eq for HaltReason {}
+
+impl core::hash::Hash for HaltReason {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        if let Self::OutOfGas(e) = self {
+            e.hash(state);
+        }
+    }
 }
 
 impl core::error::Error for HaltReason {}
@@ -987,6 +1096,74 @@ impl fmt::Display for HaltReason {
             Self::CallTooDeep => write!(f, "call too deep"),
         }
     }
+}
+
+/// Serde helper module for [`HaltReason`].
+///
+/// Serializes `PrecompileErrorWithContext(ErrorBox)` as `PrecompileErrorWithContext(String)`
+/// using the error's `Display` output, and deserializes back by wrapping the string in [`StringError`].
+#[cfg(feature = "serde")]
+mod halt_reason_serde {
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(remote = "HaltReason")]
+    enum HaltReasonDef {
+        OutOfGas(OutOfGasError),
+        OpcodeNotFound,
+        InvalidFEOpcode,
+        InvalidJump,
+        NotActivated,
+        StackUnderflow,
+        StackOverflow,
+        OutOfOffset,
+        CreateCollision,
+        PrecompileError,
+        PrecompileErrorWithContext(#[serde(with = "error_box_serde")] ErrorBox),
+        NonceOverflow,
+        CreateContractSizeLimit,
+        CreateContractStartingWithEF,
+        CreateInitCodeSizeLimit,
+        OverflowPayment,
+        StateChangeDuringStaticCall,
+        CallNotAllowedInsideStatic,
+        OutOfFunds,
+        CallTooDeep,
+    }
+
+    impl serde::Serialize for HaltReason {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            HaltReasonDef::serialize(self, serializer)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for HaltReason {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            HaltReasonDef::deserialize(deserializer)
+        }
+    }
+}
+
+/// Serde helper for [`ErrorBox`] — serializes as Display string, deserializes as [`StringError`].
+#[cfg(feature = "serde")]
+pub(crate) mod error_box_serde {
+    use super::*;
+
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &ErrorBox,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ErrorBox, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Arc::new(StringError(s)))
+    }
+
+    use serde::Deserialize;
 }
 
 /// Out of gas errors.

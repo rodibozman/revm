@@ -2,7 +2,10 @@
 //! the precompile output type, and the precompile error type.
 use core::fmt::{self, Debug};
 use primitives::{Bytes, OnceLock};
-use std::{borrow::Cow, boxed::Box, string::String, vec::Vec};
+use std::{borrow::Cow, boxed::Box, string::String, sync::Arc, vec::Vec};
+
+/// A type-erased, cloneable, thread-safe error.
+pub type ErrorBox = Arc<dyn core::error::Error + Send + Sync>;
 
 use crate::bls12_381::{G1Point, G1PointScalar, G2Point, G2PointScalar};
 
@@ -200,7 +203,7 @@ pub trait Crypto: Send + Sync + Debug {
 pub type PrecompileFn = fn(&[u8], u64) -> PrecompileResult;
 
 /// Precompile error type.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub enum PrecompileError {
     /// out of gas is the main error. Others are here just for completeness
     OutOfGas,
@@ -273,8 +276,8 @@ pub enum PrecompileError {
     KzgInvalidInputLength,
     /// secp256k1 ecrecover failed
     Secp256k1RecoverFailed,
-    /// Fatal error with a custom error message
-    Fatal(String),
+    /// Fatal error with a type-erased error.
+    Fatal(ErrorBox),
     /// Catch-all variant with a custom error message
     Other(Cow<'static, str>),
 }
@@ -293,6 +296,27 @@ impl PrecompileError {
     /// Returns `true` if the error is out of gas.
     pub fn is_oog(&self) -> bool {
         matches!(self, Self::OutOfGas)
+    }
+}
+
+impl PartialEq for PrecompileError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Other(a), Self::Other(b)) => a == b,
+            (Self::Fatal(_), Self::Fatal(_)) => false,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+impl Eq for PrecompileError {}
+
+impl core::hash::Hash for PrecompileError {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        if let Self::Other(s) = self {
+            s.hash(state);
+        }
     }
 }
 
@@ -336,7 +360,7 @@ impl fmt::Display for PrecompileError {
             Self::KzgG1PointNotInSubgroup => "kzg g1 point not in correct subgroup",
             Self::KzgInvalidInputLength => "kzg invalid input length",
             Self::Secp256k1RecoverFailed => "secp256k1 signature recovery failed",
-            Self::Fatal(s) => s,
+            Self::Fatal(e) => return write!(f, "{e}"),
             Self::Other(s) => s,
         };
         f.write_str(s)

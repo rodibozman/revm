@@ -1,5 +1,6 @@
 use crate::FrameResult;
 use context::journaled_state::account::JournaledAccountTr;
+use context_interface::result::StringError;
 use context_interface::{
     journaled_state::JournalTr,
     result::{ExecutionResult, HaltReason, HaltReasonTr, ResultGas},
@@ -7,6 +8,7 @@ use context_interface::{
 };
 use interpreter::{Gas, InitialAndFloorGas, SuccessOrHalt};
 use primitives::{hardfork::SpecId, U256};
+use std::sync::Arc;
 
 /// Builds a [`ResultGas`] from the execution [`Gas`] struct and [`InitialAndFloorGas`].
 pub fn build_result_gas(gas: &Gas, init_and_floor_gas: InitialAndFloorGas) -> ResultGas {
@@ -126,7 +128,9 @@ pub fn output<CTX: ContextTr<Journal: JournalTr>, HALTREASON: HaltReasonTr>(
             ) {
                 if let Some(message) = context.local_mut().take_precompile_error_context() {
                     return ExecutionResult::Halt {
-                        reason: HALTREASON::from(HaltReason::PrecompileErrorWithContext(message)),
+                        reason: HALTREASON::from(HaltReason::PrecompileErrorWithContext(Arc::new(
+                            StringError(message),
+                        ))),
                         gas: result_gas,
                         logs,
                     };

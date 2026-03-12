@@ -2,7 +2,7 @@ use crate::{
     evm::FrameTr, item_or_result::FrameInitOrResult, precompile_provider::PrecompileProvider,
     CallFrame, CreateFrame, FrameData, FrameResult, ItemOrResult,
 };
-use context::result::FromStringError;
+use context::result::FromError;
 use context_interface::{
     context::{take_error, ContextError},
     journaled_state::{account::JournaledAccountTr, JournalCheckpoint, JournalTr},
@@ -135,7 +135,7 @@ impl EthFrame<EthInterpreter> {
     pub fn make_call_frame<
         CTX: ContextTr,
         PRECOMPILES: PrecompileProvider<CTX, Output = InterpreterResult>,
-        ERROR: From<ContextTrDbError<CTX>> + FromStringError,
+        ERROR: From<ContextTrDbError<CTX>> + FromError,
     >(
         mut this: OutFrame<'_, Self>,
         ctx: &mut CTX,
@@ -189,7 +189,7 @@ impl EthFrame<EthInterpreter> {
         let is_static = inputs.is_static;
         let gas_limit = inputs.gas_limit;
 
-        if let Some(result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
+        if let Some(result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_error)? {
             let mut logs = Vec::new();
             if result.result.is_ok() {
                 ctx.journal_mut().checkpoint_commit();
@@ -248,10 +248,7 @@ impl EthFrame<EthInterpreter> {
 
     /// Make create frame.
     #[inline]
-    pub fn make_create_frame<
-        CTX: ContextTr,
-        ERROR: From<ContextTrDbError<CTX>> + FromStringError,
-    >(
+    pub fn make_create_frame<CTX: ContextTr, ERROR: From<ContextTrDbError<CTX>> + FromError>(
         mut this: OutFrame<'_, Self>,
         context: &mut CTX,
         depth: usize,
@@ -379,10 +376,7 @@ impl EthFrame<EthInterpreter> {
 
 impl EthFrame<EthInterpreter> {
     /// Processes the next interpreter action, either creating a new frame or returning a result.
-    pub fn process_next_action<
-        CTX: ContextTr,
-        ERROR: From<ContextTrDbError<CTX>> + FromStringError,
-    >(
+    pub fn process_next_action<CTX: ContextTr, ERROR: From<ContextTrDbError<CTX>> + FromError>(
         &mut self,
         context: &mut CTX,
         next_action: InterpreterAction,
@@ -437,7 +431,7 @@ impl EthFrame<EthInterpreter> {
     }
 
     /// Processes a frame result and updates the interpreter state accordingly.
-    pub fn return_result<CTX: ContextTr, ERROR: From<ContextTrDbError<CTX>> + FromStringError>(
+    pub fn return_result<CTX: ContextTr, ERROR: From<ContextTrDbError<CTX>> + FromError>(
         &mut self,
         ctx: &mut CTX,
         result: FrameResult,
